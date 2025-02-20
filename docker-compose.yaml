@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: my_redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./redisdata:/data
+
+  staking_monitor:
+    build: .
+    container_name: staking_monitor
+    depends_on:
+      - redis
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      RPC_URL: "https://api.mainnet.abs.xyz"     # URL HTTP pour le scan historique
+      WS_RPC_URL: "wss://api.mainnet.abs.xyz/ws"   # URL WebSocket pour le live
+      STAKING_CONTRACT_ADDRESS: "0x06d7ee1d50828ca96e11890a1601f6fe61f1e584"
+      FALLBACK_START_BLOCK: "2273309"
+      REORG_SAFETY: "0"
+      BLOCK_BATCH_SIZE: "5000"
+      BLOCK_WRITE_FREQUENCY: "10"
+      TWITTER_USERNAME: ""
+      TWITTER_PASSWORD: ""
+      TWITTER_EMAIL: ""
