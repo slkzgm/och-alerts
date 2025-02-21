@@ -1,17 +1,24 @@
-// src/index.ts
+// path: src/index.ts
+// Dev note: Main entry point. We connect to DB, init Twitter, start monitoring, and also start the reveal queue processing loop.
 
-/**
- * This file is the entry point of the application.
- */
-
-import { monitorStakingEvents } from "./stakingMonitor";
-import { initTwitterClient } from './twitter';
+import { monitorStakingEvents } from "./monitor/stakingMonitor";
+import { initTwitterClient } from './twitter/twitter';
+import { connectMongoDB } from "./db";
+import { MONGO_URI } from "./config";
+import { startQueueProcessing } from "./monitor/revealQueue";
 
 async function main() {
     try {
-        console.log("[main] Starting staking monitor...");
+        console.log("[main] Starting application...");
+        await connectMongoDB(MONGO_URI);
         await initTwitterClient();
+
+        // Start monitoring staking events
         await monitorStakingEvents();
+
+        // Start the reveal queue processing loop
+        startQueueProcessing();
+
     } catch (error) {
         console.error("[main] Error in main application flow:", error);
         process.exit(1);
