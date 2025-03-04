@@ -1,119 +1,129 @@
 // path: src/monitor/stakingMonitor.ts
-// Dev note: This file sets up a purely real-time monitor via WebSocket. It loads the set of unrevealed tokens from the DB,
-// listens for the "Staked" event, and when it sees a token that's in our unrevealed set, it waits 15s, fetches metadata,
-// and if revealed, tweets + updates the DB and removes it from our local set.
+// Dev note: Purely real-time monitor without historical sync.
+// We store in memory all tokens that the DB believes is unrevealed.
+// When we detect a "Staked" event for one of these tokens,
+// we wait 15s, fetch metadata, and only mark isRevealed=true if `metadata.image` != the unrevealed URL.
 
-import {
-    createPublicClient,
-    webSocket,
-    parseAbiItem,
-    type Log
-} from "viem";
+import { createPublicClient, webSocket, parseAbiItem, type Log } from "viem";
 import { abstract } from "viem/chains";
 
 import { STAKING_CONTRACT_ADDRESS, WS_RPC_URL } from "../config";
 import { Hero } from "../db/hero.model";
-import { fetchMetadataAndAlert } from "../utils/metadata";
 import { setHeroRevealed } from "../utils/heroRevealCheck";
+import { tweetReveal } from "../twitter/twitter";
+import axios from "axios";
+import { sharedWsClient } from "../client/wsClient"; // We'll do a direct axios call to metadata here or you can import fetchMetadata function
 
-// Define the ABI for the "Staked" event.
-// This ensures viem will filter & decode logs correctly before calling onLogs.
 const STAKING_EVENT_ABI = parseAbiItem(
-    "event Staked(address owner, uint256 tokenId, uint256 timestamp)"
+  "event Staked(address owner, uint256 tokenId, uint256 timestamp)"
 );
 
-// Create a WebSocket client for real-time event watching
-const wsClient = createPublicClient({
-    chain: abstract,
-    transport: webSocket(WS_RPC_URL),
-});
-
-/**
- * This in-memory Set holds all token IDs that the DB considers unrevealed.
- * Whenever a "Staked" event involves one of these token IDs, we'll attempt to fetch its metadata.
- */
 const unrevealedTokensSet: Set<number> = new Set();
+const UNREVEALED_URL = "https://storage.onchainheroes.xyz/unrevealed/hero.gif";
 
 /**
- * Main function to start the real-time monitor:
- *  1. Load all unrevealed tokens from MongoDB into an in-memory Set.
- *  2. Listen for "Staked" events over WebSocket.
- *  3. If a token is in the unrevealed set, wait 15s, fetch metadata, tweet, and mark as revealed if applicable.
+ * Start the real-time monitor:
+ *  1) Load all unrevealed tokens from DB into memory.
+ *  2) Subscribe to "Staked" event over WebSocket.
  */
 export async function monitorStakingEvents() {
-    console.log("[monitorStakingEvents] Starting real-time monitor...");
-    await loadUnrevealedTokens();
-    watchNewEvents();
-    console.log("[monitorStakingEvents] Real-time monitoring is active.");
+  console.log("[monitorStakingEvents] Starting real-time monitor...");
+  await loadUnrevealedTokens();
+  watchNewEvents();
+  console.log("[monitorStakingEvents] Real-time monitoring is active.");
 }
 
 /**
- * Load from the DB all tokens that are marked `isRevealed=false`.
- * Add them to the `unrevealedTokensSet`.
+ * Load all tokens that are isRevealed=false from DB into an in-memory Set.
  */
 async function loadUnrevealedTokens() {
-    console.log("[monitorStakingEvents] Loading unrevealed tokens from DB...");
-    const unrevealedHeroes = await Hero.find({ isRevealed: false }, { tokenId: 1 }).lean();
-    for (const hero of unrevealedHeroes) {
-        unrevealedTokensSet.add(hero.tokenId);
-    }
-    console.log(`[monitorStakingEvents] Loaded ${unrevealedHeroes.length} unrevealed tokens into memory.`);
+  console.log("[monitorStakingEvents] Loading unrevealed tokens from DB...");
+  const unrevealedHeroes = await Hero.find(
+    { isRevealed: false },
+    { tokenId: 1 }
+  ).lean();
+  for (const hero of unrevealedHeroes) {
+    unrevealedTokensSet.add(hero.tokenId);
+  }
+  console.log(
+    `[monitorStakingEvents] Loaded ${unrevealedHeroes.length} unrevealed tokens into memory.`
+  );
 }
 
 /**
- * Set up a WebSocket subscription to the "Staked" event.
- * By providing the parsed STAKING_EVENT_ABI, viem will only send logs that match that event signature
- * and will auto-decode them into `log.args`.
+ * Set up the WebSocket subscription for the "Staked" event.
  */
 function watchNewEvents() {
-    wsClient.watchEvent({
-        address: STAKING_CONTRACT_ADDRESS as `0x${string}`,
-        event: STAKING_EVENT_ABI,
-        onLogs: async (logs: Log[]) => {
-            for (const log of logs) {
-                const { owner, tokenId } = log.args as {
-                    owner: string;
-                    tokenId: bigint;
-                    timestamp: bigint; // not used here, but present if needed
-                };
-                await handleStakingLog(owner, tokenId);
-            }
-        },
-        onError: (err: any) => {
-            console.error("[watchNewEvents] WebSocket error:", err);
-        }
-    });
+  sharedWsClient.watchEvent({
+    address: STAKING_CONTRACT_ADDRESS as `0x${string}`,
+    event: STAKING_EVENT_ABI,
+    onLogs: async (logs: Log[]) => {
+      for (const log of logs) {
+        const { owner, tokenId } = log.args as {
+          owner: string;
+          tokenId: bigint;
+          timestamp: bigint;
+        };
+        await handleStakingLog(owner, tokenId);
+      }
+    },
+    onError: (err: any) => {
+      console.error("[watchNewEvents] WebSocket error:", err);
+    },
+  });
 }
 
 /**
- * Handles one "Staked" log. We check if the token is still in `unrevealedTokensSet`.
- * If not, we skip. If yes, we wait 15s, then fetch metadata, tweet if revealed, and update the DB.
+ * If token is still in `unrevealedTokensSet`, we wait 15s, fetch metadata,
+ * and if the image is NOT the unrevealed URL, we tweet + set DB isRevealed=true.
  */
 async function handleStakingLog(owner: string, tokenIdBig: bigint) {
-    const tokenIdNum = Number(tokenIdBig);
+  const tokenIdNum = Number(tokenIdBig);
 
-    // If not in the set, we consider it already revealed or not relevant.
-    if (!unrevealedTokensSet.has(tokenIdNum)) {
+  if (!unrevealedTokensSet.has(tokenIdNum)) {
+    // It's either already revealed or not relevant
+    return;
+  }
+
+  console.log(
+    `[handleStakingLog] Token #${tokenIdNum} is unrevealed; scheduling metadata fetch...`
+  );
+
+  setTimeout(async () => {
+    try {
+      const metadataUrl = `https://api.onchainheroes.xyz/hero/${tokenIdNum}`;
+      console.log(
+        `[handleStakingLog] Fetching metadata for token #${tokenIdNum} at: ${metadataUrl}`
+      );
+      const res = await axios.get(metadataUrl, { timeout: 10000 });
+      const metadata = res.data;
+
+      // If image is still "unrevealed" => do nothing
+      if (metadata.image === UNREVEALED_URL) {
+        console.log(
+          `[handleStakingLog] Token #${tokenIdNum} is STILL unrevealed. Not setting DB to revealed.`
+        );
         return;
+      }
+
+      // Otherwise, it's revealed => tweet and update DB
+      console.log(
+        `[handleStakingLog] Token #${tokenIdNum} is revealed! Tweeting now...`
+      );
+      await tweetReveal(tokenIdNum.toString(), owner, metadata.image);
+
+      await setHeroRevealed(tokenIdNum.toString());
+      unrevealedTokensSet.delete(tokenIdNum);
+      console.log(
+        `[handleStakingLog] Token #${tokenIdNum} marked revealed and removed from set.`
+      );
+    } catch (error) {
+      console.error(
+        `[handleStakingLog] Failed to fetch or reveal token #${tokenIdNum}:`,
+        error
+      );
+      // If you want a more robust retry, keep token in set (which we do by default).
+      // We'll attempt again next time we see a "Staked" event, or after re-running initMetadata.
     }
-
-    console.log(`[handleStakingLog] Token #${tokenIdNum} is unrevealed; scheduling metadata fetch...`);
-
-    // Delay 15 seconds to ensure the metadata is fully updated on the external API
-    setTimeout(async () => {
-        try {
-            // fetchMetadataAndAlert will attempt to fetch the NFT metadata and tweet if revealed
-            await fetchMetadataAndAlert(tokenIdNum.toString(), owner);
-
-            // If it was actually revealed, we set it in DB
-            await setHeroRevealed(tokenIdNum.toString());
-
-            // Remove from the set so we don't retry on subsequent "Staked" events
-            unrevealedTokensSet.delete(tokenIdNum);
-            console.log(`[handleStakingLog] Token #${tokenIdNum} is now revealed. Removed from set.`);
-        } catch (error) {
-            console.error(`[handleStakingLog] Failed to fetch or reveal token #${tokenIdNum}:`, error);
-            // If you want to retry automatically, consider leaving it in the set or introducing a queue system.
-        }
-    }, 15_000);
+  }, 15_000);
 }
