@@ -22,6 +22,7 @@
     "mongoose": "^8.10.1",
     "p-limit": "^6.2.0",
     "prettier": "^3.5.3",
+    "sharp": "^0.33.5",
     "viem": "^2.23.3"
   },
   "engines": {

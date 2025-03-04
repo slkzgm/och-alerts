@@ -4,6 +4,7 @@
 import { Scraper } from "agent-twitter-client";
 import axios from "axios";
 import { TWITTER_EMAIL, TWITTER_PASSWORD, TWITTER_USERNAME } from "../config";
+import sharp from "sharp";
 
 const twitterClient = new Scraper();
 let isInitialized = false;
@@ -31,17 +32,32 @@ export async function initTwitterClient(): Promise<void> {
 }
 
 /**
- * Downloads media from a given URL and returns an object containing the media data and its MIME type.
+ * Downloads media from a given URL, optionally applies grayscale if it's a PNG.
+ * @param mediaUrl - The direct URL of the media.
+ * @param mimeType - The MIME type (e.g., image/png, image/gif).
+ * @param applyGrayscale - Whether or not to apply a grayscale transform.
+ * @returns An object containing the media data (Buffer) and its MIME type.
  */
 export async function getMediaDataFromUrl(
   mediaUrl: string,
-  mimeType?: string
+  mimeType?: string,
+  applyGrayscale?: boolean
 ): Promise<{ data: Buffer; mediaType: string }> {
   try {
     console.log(`[getMediaDataFromUrl] Downloading media from: ${mediaUrl}`);
     const response = await axios.get(mediaUrl, { responseType: "arraybuffer" });
-    const mediaData = Buffer.from(response.data, "binary");
-    return { data: mediaData, mediaType: mimeType || "image/png" };
+    let mediaData = Buffer.from(response.data, "binary");
+
+    // Only apply grayscale if requested and if it's a PNG
+    if (applyGrayscale && (mimeType || "").includes("image/png")) {
+      console.log("[getMediaDataFromUrl] Applying grayscale transformation...");
+      mediaData = await sharp(mediaData).grayscale().toBuffer();
+    }
+
+    return {
+      data: mediaData,
+      mediaType: mimeType || "image/png",
+    };
   } catch (error) {
     console.error("[getMediaDataFromUrl] Error downloading media:", error);
     throw error;
@@ -81,7 +97,8 @@ export async function tweetReveal(
  */
 export async function tweetDeath(
   tokenId: string,
-  imageUrl?: string
+  imageUrl?: string,
+  level?: number
 ): Promise<void> {
   try {
     if (!isInitialized) {
@@ -89,7 +106,7 @@ export async function tweetDeath(
     }
 
     // Fallback tweet text if no image
-    let tweetText = `Hero #${tokenId} has met an untimely end. Rest in peace.`;
+    let tweetText = `Hero #${tokenId} has met an untimely end at level ${level}. Rest in peace.`;
 
     let mediaDataObj: { data: Buffer; mediaType: string } | undefined;
 
@@ -99,7 +116,7 @@ export async function tweetDeath(
       if (urlLower.endsWith(".gif")) {
         mimeType = "image/gif";
       }
-      mediaDataObj = await getMediaDataFromUrl(imageUrl, mimeType);
+      mediaDataObj = await getMediaDataFromUrl(imageUrl, mimeType, true);
       tweetText += `\n\nGone but not forgotten.`;
     }
 
