@@ -65,12 +65,12 @@ async function handleDeathLog(heroIdBig: bigint) {
 
     const res = await axios.get(metadataUrl, { timeout: 10000 });
     const metadata = res.data;
-    const level = metadata?.attributes.find(
+    const level = (metadata?.attributes.find(
       (attr) => attr.trait_type === "Season 1 Level"
-    );
+    )).value;
 
     // Tweet about hero death
-    await tweetDeath(heroIdNum.toString(), metadata?.image, level?.value);
+    await tweetDeath(heroIdNum.toString(), metadata?.image, level);
 
     console.log(
       `[handleDeathLog] Hero #${heroIdNum} marked as dead and tweet sent.`

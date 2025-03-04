@@ -106,11 +106,22 @@ async function handleStakingLog(owner: string, tokenIdBig: bigint) {
         return;
       }
 
+      const level = (metadata?.attributes.find(
+        (attr) => attr.trait_type === "Season 1 Level"
+      )).value;
+
       // Otherwise, it's revealed => tweet and update DB
-      console.log(
-        `[handleStakingLog] Token #${tokenIdNum} is revealed! Tweeting now...`
-      );
-      await tweetReveal(tokenIdNum.toString(), owner, metadata.image);
+
+      if (level > 1) {
+        console.log(
+          `[handleStakingLog] Token #${tokenIdNum} level > 1. Already revealed.`
+        );
+      } else {
+        console.log(
+          `[handleStakingLog] Token #${tokenIdNum} is revealed! Tweeting now...`
+        );
+        await tweetReveal(tokenIdNum.toString(), owner, metadata.image);
+      }
 
       await setHeroRevealed(tokenIdNum.toString());
       unrevealedTokensSet.delete(tokenIdNum);
