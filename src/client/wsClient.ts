@@ -30,6 +30,10 @@ export const sharedWsClient = createPublicClient({
     // Retry forever; set a finite number if you'd prefer to eventually give up.
     maxRetries: Infinity,
 
+    keepAlive: { interval: 1_000 },
+
+    reconnect: true,
+
     // Provide a delay function so attempts back off progressively
     retryDelay: exponentialBackoffDelay,
 
