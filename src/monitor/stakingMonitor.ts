@@ -1,18 +1,19 @@
 // path: src/monitor/stakingMonitor.ts
-// Dev note: Purely real-time monitor without historical sync.
-// We store in memory all tokens that the DB believes is unrevealed.
-// When we detect a "Staked" event for one of these tokens,
-// we wait 15s, fetch metadata, and only mark isRevealed=true if `metadata.image` != the unrevealed URL.
+/**
+ * Monitor for staking events with enhanced error handling and reconnection capabilities.
+ * Uses the improved WebSocket client for robust operation.
+ */
 
-import { createPublicClient, webSocket, parseAbiItem, type Log } from "viem";
-import { abstract } from "viem/chains";
-
-import { STAKING_CONTRACT_ADDRESS, WS_RPC_URL } from "../config";
+import { parseAbiItem, type Log } from "viem";
+import { STAKING_CONTRACT_ADDRESS } from "../config";
 import { Hero } from "../db/hero.model";
 import { setHeroRevealed } from "../utils/heroRevealCheck";
 import { tweetReveal } from "../twitter/twitter";
 import axios from "axios";
-import { sharedWsClient } from "../client/wsClient"; // We'll do a direct axios call to metadata here or you can import fetchMetadata function
+import {
+  watchEventWithErrorHandling,
+  registerSubscription,
+} from "../clients/wsClient";
 
 const STAKING_EVENT_ABI = parseAbiItem(
   "event Staked(address owner, uint256 tokenId, uint256 timestamp)"
@@ -22,60 +23,7 @@ const unrevealedTokensSet: Set<number> = new Set();
 const UNREVEALED_URL = "https://storage.onchainheroes.xyz/unrevealed/hero.gif";
 
 /**
- * Start the real-time monitor:
- *  1) Load all unrevealed tokens from DB into memory.
- *  2) Subscribe to "Staked" event over WebSocket.
- */
-export async function monitorStakingEvents() {
-  console.log("[monitorStakingEvents] Starting real-time monitor...");
-  await loadUnrevealedTokens();
-  watchNewEvents();
-  console.log("[monitorStakingEvents] Real-time monitoring is active.");
-}
-
-/**
- * Load all tokens that are isRevealed=false from DB into an in-memory Set.
- */
-async function loadUnrevealedTokens() {
-  console.log("[monitorStakingEvents] Loading unrevealed tokens from DB...");
-  const unrevealedHeroes = await Hero.find(
-    { isRevealed: false },
-    { tokenId: 1 }
-  ).lean();
-  for (const hero of unrevealedHeroes) {
-    unrevealedTokensSet.add(hero.tokenId);
-  }
-  console.log(
-    `[monitorStakingEvents] Loaded ${unrevealedHeroes.length} unrevealed tokens into memory.`
-  );
-}
-
-/**
- * Set up the WebSocket subscription for the "Staked" event.
- */
-function watchNewEvents() {
-  sharedWsClient.watchEvent({
-    address: STAKING_CONTRACT_ADDRESS as `0x${string}`,
-    event: STAKING_EVENT_ABI,
-    onLogs: async (logs: Log[]) => {
-      for (const log of logs) {
-        const { owner, tokenId } = log.args as {
-          owner: string;
-          tokenId: bigint;
-          timestamp: bigint;
-        };
-        await handleStakingLog(owner, tokenId);
-      }
-    },
-    onError: (err: any) => {
-      console.error("[watchNewEvents] WebSocket error:", err);
-    },
-  });
-}
-
-/**
- * If token is still in `unrevealedTokensSet`, we wait 15s, fetch metadata,
- * and if the image is NOT the unrevealed URL, we tweet + set DB isRevealed=true.
+ * Handle a single staking event log
  */
 async function handleStakingLog(owner: string, tokenIdBig: bigint) {
   const tokenIdNum = Number(tokenIdBig);
@@ -106,13 +54,13 @@ async function handleStakingLog(owner: string, tokenIdBig: bigint) {
         return;
       }
 
-      const level = (metadata?.attributes.find(
-        (attr) => attr.trait_type === "Season 1 Level"
-      )).value;
+      const levelAttr = metadata?.attributes?.find(
+        (attr: any) => attr.trait_type === "Season 1 Level"
+      );
+      const level = levelAttr ? levelAttr.value : undefined;
 
       // Otherwise, it's revealed => tweet and update DB
-
-      if (level > 1) {
+      if (level && level > 1) {
         console.log(
           `[handleStakingLog] Token #${tokenIdNum} level > 1. Already revealed.`
         );
@@ -137,4 +85,87 @@ async function handleStakingLog(owner: string, tokenIdBig: bigint) {
       // We'll attempt again next time we see a "Staked" event, or after re-running initMetadata.
     }
   }, 15_000);
+}
+
+/**
+ * Load all tokens that are isRevealed=false from DB into an in-memory Set.
+ */
+async function loadUnrevealedTokens() {
+  console.log("[monitorStakingEvents] Loading unrevealed tokens from DB...");
+  try {
+    const unrevealedHeroes = await Hero.find(
+      { isRevealed: false },
+      { tokenId: 1 }
+    ).lean();
+
+    for (const hero of unrevealedHeroes) {
+      unrevealedTokensSet.add(hero.tokenId);
+    }
+
+    console.log(
+      `[monitorStakingEvents] Loaded ${unrevealedHeroes.length} unrevealed tokens into memory.`
+    );
+  } catch (error) {
+    console.error(
+      "[monitorStakingEvents] Error loading unrevealed tokens:",
+      error
+    );
+    // Allow continuation with empty set - we'll retry loading on reconnection
+  }
+}
+
+/**
+ * Set up the event subscription with error handling
+ */
+function setupEventSubscription() {
+  console.log(
+    "[monitorStakingEvents] Setting up event subscription for Staked events..."
+  );
+
+  // Use the enhanced watchEventWithErrorHandling function
+  watchEventWithErrorHandling({
+    address: STAKING_CONTRACT_ADDRESS as `0x${string}`,
+    event: STAKING_EVENT_ABI,
+    onLogs: async (logs: Log[]) => {
+      for (const log of logs) {
+        try {
+          const { owner, tokenId } = log.args as {
+            owner: string;
+            tokenId: bigint;
+            timestamp: bigint;
+          };
+          await handleStakingLog(owner, tokenId);
+        } catch (error) {
+          console.error("[monitorStakingEvents] Error processing log:", error);
+          // Continue with next log even if one fails
+        }
+      }
+    },
+    onError: (err: any) => {
+      console.error("[monitorStakingEvents] WebSocket error:", err);
+      // No need to rethrow - our wrapper will handle errors properly
+    },
+  });
+}
+
+/**
+ * Initialize monitoring with registration for reconnection
+ */
+export async function monitorStakingEvents() {
+  console.log("[monitorStakingEvents] Starting staking event monitor...");
+
+  // Initial setup
+  await loadUnrevealedTokens();
+  setupEventSubscription();
+
+  // Register for reconnection handling
+  registerSubscription(async () => {
+    console.log(
+      "[monitorStakingEvents] Reconnecting - reloading unrevealed tokens..."
+    );
+    await loadUnrevealedTokens();
+    setupEventSubscription();
+  });
+
+  console.log("[monitorStakingEvents] Staking event monitoring is active.");
 }
