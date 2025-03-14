@@ -26,12 +26,52 @@ function exponentialBackoffDelay({
 // Keep track of active subscriptions to restore them on reconnection
 const activeSubscriptions: Array<() => void> = [];
 
+// Track the WebSocket connection status
+let isConnected = false;
+let lastConnectedTime: string | null = null;
+let reconnectAttempts = 0;
+
 /**
  * Register a subscription function to be called on reconnection
  */
 export function registerSubscription(subscriptionFn: () => void): void {
   activeSubscriptions.push(subscriptionFn);
 }
+
+/**
+ * Returns current WebSocket connection status
+ */
+export function getWebSocketStatus(): {
+  isConnected: boolean;
+  lastConnectedTime: string | null;
+  reconnectAttempts: number;
+  activeSubscriptions: number;
+} {
+  return {
+    isConnected,
+    lastConnectedTime,
+    reconnectAttempts,
+    activeSubscriptions: activeSubscriptions.length,
+  };
+}
+
+/**
+ * WebSocket heartbeat mechanism - periodically logs connection status
+ */
+setInterval(
+  () => {
+    const timestamp = new Date().toISOString();
+    const status = getWebSocketStatus();
+    console.log(
+      `[sharedWsClient] ${timestamp} - HEARTBEAT - WebSocket status: ` +
+        `connected=${status.isConnected}, ` +
+        `lastConnected=${status.lastConnectedTime || "never"}, ` +
+        `reconnectAttempts=${status.reconnectAttempts}, ` +
+        `activeSubscriptions=${status.activeSubscriptions}`
+    );
+  },
+  5 * 60 * 1000
+); // Log WebSocket status every 5 minutes
 
 /**
  * Create a resilient WebSocket client with comprehensive error handling
@@ -50,19 +90,24 @@ export const sharedWsClient: PublicClient = createPublicClient({
 
     // Comprehensive connection lifecycle management
     onOpen: () => {
-      console.log("[sharedWsClient] WebSocket connection opened successfully.");
+      const timestamp = new Date().toISOString();
+      isConnected = true;
+      lastConnectedTime = timestamp;
+      console.log(
+        `[sharedWsClient] ${timestamp} - WebSocket connection opened successfully.`
+      );
 
       // Restore all active subscriptions when connection is re-established
       if (activeSubscriptions.length > 0) {
         console.log(
-          `[sharedWsClient] Restoring ${activeSubscriptions.length} active subscriptions...`
+          `[sharedWsClient] ${timestamp} - Restoring ${activeSubscriptions.length} active subscriptions...`
         );
         activeSubscriptions.forEach((subscription) => {
           try {
             subscription();
           } catch (err) {
             console.error(
-              "[sharedWsClient] Error restoring subscription:",
+              `[sharedWsClient] ${timestamp} - Error restoring subscription:`,
               err
             );
           }
@@ -71,19 +116,27 @@ export const sharedWsClient: PublicClient = createPublicClient({
     },
 
     onClose: () => {
+      const timestamp = new Date().toISOString();
+      isConnected = false;
       console.warn(
-        "[sharedWsClient] WebSocket connection closed. Will attempt to reconnect..."
+        `[sharedWsClient] ${timestamp} - WebSocket connection closed. Will attempt to reconnect...`
       );
     },
 
     onError: (error) => {
-      console.error("[sharedWsClient] WebSocket connection error:", error);
+      const timestamp = new Date().toISOString();
+      console.error(
+        `[sharedWsClient] ${timestamp} - WebSocket connection error:`,
+        error
+      );
       // We don't throw here, just log it and let the built-in reconnection handle it
     },
 
     onReconnect: (attemptCount) => {
+      const timestamp = new Date().toISOString();
+      reconnectAttempts = attemptCount;
       console.log(
-        `[sharedWsClient] Attempting to reconnect, attempt #${attemptCount}...`
+        `[sharedWsClient] ${timestamp} - Attempting to reconnect, attempt #${attemptCount}...`
       );
     },
   }),

@@ -10,6 +10,7 @@ import { connectMongoDB } from "./db";
 import { MONGO_URI } from "./config";
 import { startQueueProcessing } from "./monitor/revealQueue";
 import { monitorEndgameEvents } from "./monitor/endgameMonitor";
+import { getWebSocketStatus } from "./clients/wsClient";
 
 // Set up global error handlers to prevent app crashes
 process.on("uncaughtException", (error) => {
@@ -120,9 +121,51 @@ async function main() {
 
   console.log("[main] Application startup complete. Service is now running.");
 
-  // Keep the process alive
+  // Periodically force re-subscribe to events (safety mechanism)
+  setInterval(async () => {
+    const timestamp = new Date().toISOString();
+    console.log(
+      `[main] ${timestamp} - Performing periodic resubscription to events...`
+    );
+
+    try {
+      // Re-subscribe to staking events
+      await monitorStakingEvents();
+      console.log(
+        `[main] ${timestamp} - Staking events resubscribed successfully.`
+      );
+    } catch (error) {
+      console.error(
+        `[main] ${timestamp} - Failed to resubscribe to staking events:`,
+        error
+      );
+    }
+
+    try {
+      // Re-subscribe to endgame events
+      await monitorEndgameEvents();
+      console.log(
+        `[main] ${timestamp} - Endgame events resubscribed successfully.`
+      );
+    } catch (error) {
+      console.error(
+        `[main] ${timestamp} - Failed to resubscribe to endgame events:`,
+        error
+      );
+    }
+  }, 3600000); // Re-subscribe every hour
+
+  // Application heartbeat with WebSocket status check
   setInterval(() => {
-    console.log("[main] Service heartbeat - still running.");
+    const timestamp = new Date().toISOString();
+    const wsStatus = getWebSocketStatus();
+    console.log(
+      `[main] ${timestamp} - Service heartbeat - still running. ` +
+        `WebSocket status: connected=${wsStatus.isConnected}, ` +
+        `lastConnected=${wsStatus.lastConnectedTime || "never"}, ` +
+        `reconnectAttempts=${wsStatus.reconnectAttempts}, ` +
+        `activeSubscriptions=${wsStatus.activeSubscriptions}`
+    );
   }, 1800000); // Log every 30 minutes as a heartbeat
 }
 
